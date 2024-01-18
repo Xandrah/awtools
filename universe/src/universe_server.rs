@@ -2,15 +2,17 @@ use aw_core::*;
 
 use crate::{
     client::{Client, ClientManager},
-    config,
+    configuration,
     database::Database,
     packet_handler,
     universe_license::LicenseGenerator,
 };
 use std::net::{SocketAddrV4, TcpListener};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub struct UniverseServer {
-    config: config::UniverseConfig,
+    config: configuration::UniverseConfig,
     license_generator: LicenseGenerator,
     client_manager: ClientManager,
     database: Database,
@@ -18,7 +20,7 @@ pub struct UniverseServer {
 }
 
 impl UniverseServer {
-    pub fn new(config: config::Config) -> Result<Self, String> {
+    pub fn new(config: configuration::Config) -> Result<Self, String> {
         let database = Database::new(config.mysql, &config.universe)?;
 
         // The Universe server provides a license to incoming clients, which must contain information
@@ -43,17 +45,39 @@ impl UniverseServer {
 
     pub fn run(&mut self) {
         log::info!(
-            "Starting universe on {}:{}. Providing licenses for {}.",
+            "Starting universe on {}:{}. Providing licenses for {}. Protocol version {}.",
             self.config.bind_ip,
             self.config.port,
             self.config.license_ip,
+            Self::protocol_version(),
         );
-        loop {
+
+        let running = Arc::new(AtomicBool::new(true));
+
+        let r = running.clone();
+        ctrlc::set_handler(move || {
+            r.store(false, Ordering::SeqCst);
+        })
+        .expect("Error setting Ctrl-C handler");
+
+        while running.load(Ordering::SeqCst) {
             self.accept_new_clients();
             self.service_clients();
             self.client_manager.remove_dead_clients(&self.database);
             self.client_manager.send_heartbeats();
         }
+
+        log::info!("Shutting down universe.");
+    }
+
+    fn protocol_version() -> &'static str {
+        #[cfg(feature = "protocol_v4")]
+        return "4";
+
+        #[cfg(feature = "protocol_v6")]
+        return "6";
+
+        return "";
     }
 
     fn accept_new_clients(&mut self) {
